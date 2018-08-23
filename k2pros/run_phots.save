@@ -1,0 +1,585 @@
+function lcfit,p
+common lcfit1_com,tvector,phot3,time,cbv,ncbv,xc0,yc0,res_rms,thalf,delt,wht2,wht3,repos,res,res2,nomedian,p2,coeff2
+
+nnt = n_elements(time)
+
+Means=[1.0024611,0.037057074,0.022172418,0.030990787,-0.080460107,-0.035536913,-0.20161296,0.063242990,0.059915782,-0.076916908,0.024792781,0.00021321020,0.00046947661,-9.2374493e-05]
+RMS=[0.084821948,0.31286248,0.18187190,0.51872756,0.24554492,0.58011776,0.61093506,0.35707058,1.0445499,0.98821772,0.012828108,0.0030392286,0.0030703315,0.0016007209]
+; 0.018536782   -0.0022737097    0.0010295455  -0.00022264886
+;0.017359422   -0.0011991262    0.0015072652  -0.00014538185
+; 0.016458488   -0.0026433039   0.00086963661  -9.1400552e-05
+np2 = n_elements(p2)
+
+
+radial = 0
+
+if ~radial then begin
+    nextra = 8
+	xc = xc0 - p[3]
+	yc = yc0 - p[4]
+	
+   f1 = p[0] + p[1]*abs(xc) + p[2]*abs(yc) $
+    + p[5]*xc^2 + p[6]*yc^2 + p[7]*xc*yc  
+;    + p[6]*xc0^3 + p[7]*yc0^3 + p[8]*xc0^2*yc0  $ 
+;    + p[9]*xc0*yc0^2
+endif else begin
+    nextra = 10
+	p[7] = -5d0 > p[7] < 5d0
+	xc = xc0 - p[3]
+	yc = yc0 - p[4]
+	rc = sqrt(xc^2 + yc^2)
+	f1 = p[0] + p[1]*rc^p[2]+ p[5]*xc + p[6]*yc  $
+		+ p[7]*xc^2 + p[8]*yc^2 + p[9]*xc*yc 
+endelse
+
+for i = 0, ncbv-1 do f1 = f1 + p[i+nextra]*cbv[i,*] 
+;if p2[0] ne 0 then for i = 0, np2-1 do f1 = f1 + p2[i]*cbv[i,*]
+;  Add in 2nd CBV by hand
+f1 = f1 + coeff2 *cbv[1,*]
+
+remain = phot3/f1 - 1d0
+wh = where(time gt 2314)
+res=total(remain[wh[0]:wht2]^2)
+;res=total(remain[0:wht2]^2)
+
+if ~res_rms then begin
+
+	rshift = phot3/f1*mean(f1,/nan)
+	rshift = shift(rshift,-1) - rshift
+	rshift[repos] = !VALUES.D_NAN
+	rshift = abs(rshift)
+
+	res2 = 0d0
+	if nomedian then $
+		rshift = rshift^2 $
+	else $
+		rshift = abs(rshift)
+	if wht3 eq wht2 and wht3 ne 0 then begin
+		if nomedian then $
+			res2 = sqrt(total(rshift[0:wht2],/nan))*2d0 $
+		else $
+			res2 = median(rshift[0:wht2])*wht2
+	endif
+	if wht3 gt wht2 then begin
+		if nomedian then $
+			res2 = res2 + sqrt(total(rshift[wht2+1:wht3],/nan))*2d0 $
+		else $
+			res2 = res2 + median(rshift[wht2+1:wht3])*(wht3-wht2)
+	endif
+endif else res2 = 0
+res = sqrt(res)
+return,res+res2
+stop
+END
+
+
+function run_phot,campaign,apsize=apsize,mask=mask,xmldata=xmldata,ccd=ccd,$
+	kids=kids,all=all,pstep=pstep,noplot=noplot,rebin=rebin,cbv=cbv,$
+	saveplt=saveplt,phots_pca=phots_pca,rawphots=rawphots,$
+	centroids=centroids,write=write,t2=t2,yrange=yrange,peak=peak,$
+	ncbv=ncbv
+
+common lcfit1_com,tvector,phot3,time3,cbv3,ncbv3,xc03,yc03,res_rms,thalf,delt,wht2,wht3,repos,res,res2,nomedian,p2,coeff2
+
+res_rms = 0
+; Photometry on a set of targets (either all of a campaign, or all on a ccd, or a set of k2_id s)
+
+; pstep - 0 - just aperture photometry
+;         1  - remove fit of ccd median ltor
+;         2 - remove fit to xcenter,ycenter motion
+
+cd,'/mnt/sda1/home/eshaya/Documents/Kepler/K2'
+if N_PARAMS() EQ 0 THEN BEGIN
+	PRINT,'phots = run_phot(campaign,apsize=apsize,mask=mask,xmldata=xmldata,ccd=ccd,kids=kids)'
+	RETURN,0
+ENDIF
+if ~keyword_set(rebin) then rebin = 1
+scampaign = 'Campaign'+strtrim(string(campaign),2)
+
+if ~keyword_set(saveplt) then saveplt=0
+if ~keyword_set(t2) then t2=0
+if ~keyword_set(yrange) then yrange0=[.90,1.10] else yrange0=yrange
+if ~keyword_set(write) then write=0
+if ~keyword_set(peak) then peak = 0
+; If have average centroids for each ccd then set have_centroids
+if ~keyword_set(centroids) then begin
+	cenfile = scampaign+'/centroids.sav'
+	test1 = file_search(cenfile,count=count)
+	if count ne 0 then begin
+		restore,cenfile
+		have_centroids = 1
+	endif else have_centroids = 0
+endif else have_centroids = 1
+	
+if keyword_set(apsize) and keyword_set(mask) then begin
+	PRINT,'run_phot: Can not set both apsize and mask'
+	RETURN,0
+endif
+if ~keyword_set(apsize) and ~keyword_set(mask) then begin
+	mask = mymask()
+endif
+
+nways = 0
+if keyword_set(kids) then nways++
+if keyword_set(ccd) then nways++
+if keyword_set(all) then nways++
+if keyword_set(rawphots) then have_rawphots = 1 else have_rawphots = 0
+if nways gt 1 then begin
+	print,'run_phot: Set just 1 of kids, ccd, or all'
+	return,0
+endif
+if ~keyword_set(noplot) then noplot=0
+; layout params
+lx = 3
+ly = 10
+
+
+; Read xmldata if it was not passed in.
+if (campaign eq 3) then xmlfile='GO3048_C3.xml'
+if (campaign eq 5) then xmlfile='GO5096_C5.xml'
+if ~keyword_set(xmldata) then xmldata = read_votable(xmlfile)
+
+plotdir = scampaign+'/plots/'
+	
+if ~keyword_set(pstep) then pstep =  0
+
+if keyword_set(all) then kids = xmldata.k2_id
+
+; If ccd is set then we do all our targets on that ccd
+; Else we get ccd from the first target in kids
+if keyword_set(ccd) then begin
+	set = where(xmldata.channel eq ccd,nset)
+	if nset eq 0 then begin
+		print,'run_phot: No targs on ccd ',ccd
+		return,-1
+	endif else kids = xmldata.k2_id[set]
+endif else begin
+	i0 = where(xmldata.k2_id eq kids[0],nkid)
+	ccd = xmldata.channel[i0[0]]
+endelse
+if (ccd le 9) then sccd = '0'+string(ccd,format='(I1)') $
+	           else sccd = string(ccd,format='(I2)')
+
+np2 = n_elements(p2)
+
+coeff2 = -0.0025d0
+
+if ~keyword_set(cbv) then begin
+	srebin = strtrim(string(rebin),2)
+	if rebin eq 1 then srebin='0'
+	cbvfile = scampaign+'/cbv/cbv_ap5_rebin'+srebin+'_ccd'+sccd+'.sav'
+	test0 = file_search(cbvfile,count=count)
+	if count ne 0 then restore,cbvfile else begin
+		PRINT,' No CBV File'
+	endelse
+endif
+
+if np2 gt 0 then cbv0 = cbv[0:np2-1,*] 
+if ~keyword_set(ncbv) then $
+	READ,' Number of vectors: ',ncbv
+cbv0 = cbv
+ncbv3 = ncbv
+
+
+; Do photometry
+ccd_old = 0
+place = 1
+np = 1
+nkids = N_ELEMENTS(kids)
+
+gal = {kid: 0L, mean: 0., stddev: [0.,0.,0.,0.]}
+gals = replicate(gal,nkids)
+igal = 0
+if ~have_rawphots then rawphots = []
+xcs = 0
+ycs = 0
+nn = 1
+phots = []
+phots_pca = []
+pset = []
+xcmax = 300
+ycmax = 300
+radial = 0
+foreach kid, kids do begin
+	print,''
+	print, 'have_rawphots ',have_rawphots
+	print,''
+	llc=read_k2llc(kid,campaign,llctime,xc,yc)
+	; Keep targets within xcmax, xymax
+;	if keyword_set(xcmax) then  $
+;		if (abs(xc[0] - 45.7) gt xcmax) then continue
+;	if keyword_set(ycmax) then  $
+;		if (abs(yc[0] - 714.) gt ycmax) then continue
+	gals[igal].kid=kid
+	skid = string(kid,format='(i9)')
+	print,'Kid = ',skid,' on ccd ',ccd,nn++,'/',nkids,format='(a6,a9,a9,i3,i4,a1,i4)'
+	; Read in target pixel dat1
+	if ~have_rawphots then begin
+	   phot = phot_k2targ(campaign,kid,sum,apsize=apsize,mask=mask,$
+		   	xmldata=xmldata,time=time,noplot=1,peak=peak)
+	   rawphots = [[rawphots],[phot]]
+        endif else begin
+	   phot = rawphots[*,igal]
+        endelse
+	nt = n_elements(phot)
+	nonans = where(finite(phot),nnonans)
+	if nnonans lt nt/3 then begin
+	   Print, 'run_phot: Too few finite values.  Skipping ', skid
+	   PRINT, 'Finite Values = ',nnonans, ' Nt = ',nt
+	   peak = 0
+	   igal++
+	   continue
+	endif
+
+	mn = mean(phot,/nan)
+;	if (mn lt 900) then begin
+;		phot = phot_k2targ(campaign,kid,sum,mask=mymask(),xmldata=xmldata,time=time,noplot=1)
+;		mn = mean(phot,/nan)
+;	endif
+	; Read PDC light curve 
+
+	;;;; WARNING
+	;if campaign eq 5 and ccd eq 84 then have_centroids = 0
+
+	if have_centroids then begin
+		xc = reform(centroids[ccd,0,*]) + xc[0]
+		yc = reform(centroids[ccd,1,*]) + yc[0]
+	endif
+	nt = n_elements(llc)
+
+	; Rebin data
+	if rebin then begin
+		nt = nt/rebin
+		llc = congrid(llc,nt)
+		llctime = congrid(llctime,nt)
+		phot = congrid(phot,nt)
+		xc = congrid(xc,nt)
+		yc=congrid(yc,nt)
+	endif
+
+	time2 = llctime
+	xc0 = xc - double(fix(xc[0])) - 0.5
+	yc0 = yc - double(fix(yc[0])) - 0.5
+;	xc0 = xc - double(fix(xc[0])) 
+;	yc0 = yc - double(fix(yc[0]))
+
+
+	; Place lx by ly on a page
+	; if new ccd or page full then save and open new window
+	if t2 ne 0 then st2 = string(t2,format='(f6.1)')
+	if (ccd ne ccd_old or ((place mod (lx*ly)) eq 1) and nkids gt 1 $
+		and ~noplot) then begin
+		pltname = 'phots_'+scampaign+'ccd'+sccd+'_'+string(np++,format='(i1)')
+		if t2 ne 0 then pltname = pltname + '_t'+st2
+	    	if (place ne 1) and (saveplt eq 1) then $
+			plt.save,plotdir+'.eps' $
+	        else np = 1
+		wins = getwindows()
+	    	if n_elements(wins) gt 9 then wins[0].close
+	    	win = window(window_title='Channel'+string(format='(I2)',ccd), $
+		    dimensions=[395,512])
+	endif
+
+	photn = phot/mn
+	photn0 = photn
+	gals[igal].stddev[0] = stddev(photn,/nan)
+	gals[igal].mean = mn
+	nt = n_elements(phot)
+	if pstep ge 1 and cbv0[0] ne -1 then begin ;Begin pstep 1
+		cbv3 = cbv  ; just to get it into the common block
+		xc03 = xc0
+		yc03 = yc0
+		time3 = time2
+		; Prepare for curvefit to fit median curve
+;		phot3 = smooth(photn,48*3/rebin,/nan,/edge_truncate) 
+		phot3 = photn
+		print,'ncbv = ',ncbv
+
+		; For speed, get rid of NaNs before making fit
+		nonans = where(finite(phot3+xc03),nnonans)
+		phot3=phot3[nonans]
+		time3=time3[nonans]
+		xc03=xc03[nonans]
+		yc03=yc03[nonans]
+		cbv3=cbv3[*,nonans]
+		; Use for linear time term
+		;thalf = (time3[-1]+time3[0])/2.
+		;delt = time3[-1] - time3[0]
+
+	 	xminus = shift(xc03,-1) - xc03
+	 	yminus = shift(yc03,-1) - yc03
+		maxjitter = 0.1
+		; repos is last in series before a repositioning
+		; When we shift down by 1 time step this one gets
+		; a huge difference
+		repos = where(sqrt(xminus^2 + yminus^2) gt maxjitter,nrepos)
+		if kid eq 211394078 then repos = [repos,3274,3444,1337]
+
+		; Prepare for Powell Minimization
+		if radial then nextra = 10 else nextra = 8
+		nvec = ncbv + nextra
+;		if igal eq 0 then begin
+			p = dblarr(nvec)
+			p[0] = 1d0
+		;	p[nextra+1] = coeff2
+;p=[ 0.99812579, 0.015068873,-0.018388582, 0.045966616, 0.078758605, -0.17320799,-0.011310822,-0.065159601]
+
+		        FOR i = 0,nvec-1 DO BEGIN
+				x = DBLARR(nvec)
+				x[i] = 1d-1
+				IF (i EQ 0) THEN xarr =[[x]] ELSE xarr = [[xarr],[x]]
+			ENDFOR
+;		endif
+    	        wht2 = nnonans -1
+		wht3 = wht2
+		if (t2 ne 0) then begin 
+		   ww = where(time3 gt t2)
+		   wht2 = ww[0]
+		   wht3 = wht2
+	       endif
+		nomedian = 1
+		xi = TRANSPOSE(xarr)
+		xi[indgen(nvec),indgen(nvec)] *=  -5d-2
+		ftol = 1d-7
+		POWELL, P, xi,ftol,fmin,'lcfit',iter=iter,itmax=400,/double
+   		PRINT, 'Solution centroid coeffs: ', P[0:nextra-1]
+   		if ncbv ne 0 then PRINT, 'Solution PCA coeffs: ', P[nextra:*]
+		print,'fmin,res,res2',fmin,res,res2
+		if radial then begin
+			xc1 = xc0 - p[3]
+			yc1 = yc0 - p[4]
+			rc1 = sqrt(xc1^2 + yc1^2)
+			ffit = p[0] + p[1]*rc1^p[2]+ p[5]*xc1 + p[6]*yc1  $
+	    		+ p[7]*xc1^2 + p[8]*yc1^2 + p[9]*xc1*yc1 
+	
+		endif else begin
+			xc1 = xc0 - p[3]
+			yc1 = yc0 - p[4]
+    			ffit =  p[0] + p[1]*abs(xc1) + p[2]*abs(yc1)$
+			+ p[5]*xc1^2 + p[6]*yc1^2 + p[7]*xc1*yc1 
+;			+ p[6]*xc0^3 + p[7]*yc0^3 + p[8]*xc0^2*yc0  $ 
+;			+ p[9]*xc0*yc0^2
+		endelse
+	 	for i = 0, ncbv-1 do ffit = ffit + p[i+nextra]*cbv0[i,*] 
+
+;		if p2[0] ne 0 then for i = 0,np2-1 do ffit = ffit + p2[i]*cbv[i,*]
+		ffit = ffit +coeff2*cbv[1,*]
+		if t2 ne 0 then begin
+plt=plot(time2,photn/ffit ,yrange=yrange0,symbol='dot',linestyle='',$
+		title=skid,xtitle='Day',ytitle='Normalized Flux',xstyle=1)
+plt=plot(/overplot,/current,time3,photn0,color='blue',symbol='dot',linestyle='')
+wait,1
+		   wht3 = nnonans-2
+		   ftol = 1d-7
+		   ww = where(time3 gt t2)
+		   wht2 = ww[0]
+		   wht3 = wht2  - 1
+		   day = 0
+;		   while (wht3 lt nnonans - 2 ) do begin
+;	p[nextra+1] = coeff2
+;	p[nextra]= 0.0225d0
+for jj = 0,8 do begin
+		   	wht3 = (wht3 + 48*5/rebin) < (nnonans - 2)
+			print,'DAY ', day++,wht3,time3[wht3]
+			nomedian = 1
+				POWELL, P, xi,ftol,fmin,'lcfit',iter=iter,itmax=400,/double
+				; Print the solution point:
+			print, 'Number of iterations: ',iter
+			PRINT, 'Solution centroid coeffs: ', P[0:nextra-1]
+			if ncbv ne 0 then PRINT, 'Solution PCA coeffs: ', P[nextra:*]
+			print,'fmin,res,res2',fmin,res,res2
+
+			if radial then begin
+				xc1 = xc0 - p[3]
+				yc1 = yc0 - p[4]
+				rc1 = sqrt(xc1^2 + yc1^2)
+				ffit = p[0] + p[1]*rc1^p[2]+ p[5]*xc1 + p[6]*yc1  $
+					+ p[7]*xc1^2 + p[8]*yc1^2 + p[9]*xc1*yc1
+			endif else begin
+				xc1 = xc0 - p[3]
+				yc1 = yc0 - p[4]
+				ffit = p[0] + p[1]*abs(xc1)+ p[2]*abs(yc1)$
+				+ p[5]*xc1^2 + p[6]*yc1^2 + p[7]*xc1*yc1 
+	;			+ p[6]*xc0^3 + p[7]*yc0^3 + p[8]*xc0^2*yc0  $ 
+	;			+ p[9]*xc0*yc0^2
+			endelse
+		for i = 0, ncbv-1 do ffit = ffit + p[i+nextra]*cbv0[i,*] 
+;		if p2[0] ne 0 then for i = 0,np2-1 do ffit = ffit + p2[i]*cbv[i,*]
+		ffit = ffit + coeff2*cbv0[1,*]
+	plt.erase
+	plt=plot(/current,time2,photn/ffit ,yrange=yrange0,symbol='dot',linestyle='',$
+			title=skid,xtitle='Day',ytitle='Normalized Flux',xstyle=1)
+	plt=plot(/overplot,/current,time3,photn0,color='blue',symbol='dot',linestyle='')
+	wait,1
+	;	nomedian = 1
+	;		   	POWELL, P, xi,ftol,fmin,'lcfit',iter=iter,itmax=400,/double
+; 		   	; Print the solution point:
+;   		PRINT, 'Solution centroid coeffs: ', P[0:nextra-1]
+;   		if ncbv ne 0 then PRINT, 'Solution PCA coeffs: ', P[nextra:*]
+;		print,'fmin,res,res2',fmin,res,res2
+;
+;		if radial then begin
+;			xc1 = xc0 - p[3]
+;			yc1 = yc0 - p[4]
+;			rc1 = sqrt(xc1^2 + yc1^2)
+;			ffit = p[0] + p[1]*rc1^p[2]+ p[5]*xc1 + p[6]*yc1  $
+;    				+ p[7]*xc1^2 + p[8]*yc1^2 + p[9]*xc1*yc1
+;		endif else begin
+;			xc1 = xc0 - p[3]
+;			yc1 = yc0 - p[4]
+;    			ffit =  p[0] + p[1]*xc1 + p[2]*yc1 $
+;			+ p[5]*xc1^2 + p[6]*yc1^2 + p[7]*xc1*yc1 
+;;			+ p[6]*xc0^3 + p[7]*yc0^3 + p[8]*xc0^2*yc0  $ 
+;;			+ p[9]*xc0*yc0^2
+;		endelse
+;;	 	for i = 0, ncbv-1 do ffit = ffit + p[i+nextra]*cbv0[i,*] 
+;plt.erase
+;;plt=plot(/current,time2,photn/ffit ,yrange=yrange0,symbol='dot',linestyle='',$
+;		title=skid,xtitle='Day',ytitle='Normalized Flux',xstyle=1)
+;plt = plot(/overplot,/current,time3,photn0,color='blue',symbol='dot',linestyle='')
+;wait,1
+;	   	   endwhile
+endfor
+	        endif
+;		pset =[[pset],[p]]
+;		if igal gt 1 then begin
+;			print,' Means',mean(pset,dimension=2)
+;			print,' RMS ', stddev(pset,dimension=2)
+;		endif
+		print, 'Number of iterations: ',iter
+
+		if radial then begin
+			xc1 = xc0 - p[3]
+			yc1 = yc0 - p[4]
+			rc1 = sqrt(xc1^2 + yc1^2)
+			ffit = p[0] + p[1]*rc1^p[2]+ p[5]*xc1 + p[6]*yc1 $
+    				+ p[7]*xc1^2 + p[8]*yc1^2 + p[9]*xc1*yc1
+		endif else begin
+			xc1 = xc0 - p[3]
+			yc1 = yc0 - p[4]
+    			ffit =  p[0] + p[1]*abs(xc1)+ p[2]*abs(yc1)$
+			+ p[5]*xc1^2 + p[6]*yc1^2 + p[7]*xc1*yc1 
+;			+ p[6]*xc0^3 + p[7]*yc0^3 + p[8]*xc0^2*yc0  $ 
+;			+ p[9]*xc0*yc0^2
+		endelse
+
+		; List of targets to exclude from PCA
+		nodo = [211443453,211394078,21142282,21141212188]
+		wheredo = where(nodo eq kid,ndo)
+		if ndo eq 0 then $
+	 		phots_pca = [ [phots_pca],[mn*photn/ffit] ]
+
+		;ffit = ffit + p[1]*thalf/delt
+	 	for i = 0, ncbv-1 do ffit = ffit + p[i+nextra]*cbv0[i,*] 
+;		if p2[0] ne 0 then for i = 0,np2-1 do ffit = ffit + p2[i]*cbv[i,*]
+		ffit = ffit + coeff2*cbv[1,*]
+   		; Print the value at the solution point:
+   		PRINT, 'rms photn-1 before fit', $
+			sqrt(mean((photn-1d0)^2,/NAN))
+	        photn = photn/ffit
+		; Small adjust to get mean to exactly 1.0
+		photn = photn/mean(photn,/nan)
+   		PRINT, 'rms photn-1 ', $
+			sqrt(mean((photn-1d0)^2,/NAN))
+	        phot = photn*mn
+
+		gals[igal].stddev[1] = stddev(photn,/nan)
+	endif ; END pstep 1
+
+	meanlc = mean(llc,/nan)
+	gals[igal].stddev[3] = stddev(llc/meanlc,/nan)
+
+    	wins = getwindows()
+	nwins = n_elements(wins)
+	havewin2 = 0
+	if nwins gt 0 then begin
+		foreach win2, wins do begin
+			if win2.window_title eq 'Individual Target' then begin
+				havewin2 = 1
+				break
+			endif
+		endforeach
+	endif
+	if ~havewin2 then win2 = window(window_title='Individual Target', $
+		    dimensions=[512,256])
+	win2.setCurrent
+	win2.show
+	win2.erase
+	plt2=plot(/current,time2,photn0,yrange=yrange0,symbol='dot',linestyle='',$
+		title=skid,xtitle='Day',ytitle='Normalized Flux',xstyle=1,color='blue')
+	;plt2=plot(/overplot,time2,smooth(photn,48,/nan,/edge_truncate,/current)
+	;plt2=plot(/overplot,time2,smooth(llc,48,/nan,/edge_truncate)/meanlc,$
+	;	color='red',/current)
+;	plt2=plot(/overplot,time2,llc/mean(llc,/nan),color='red',symbol='dot',linestyle='',/current)
+        photplt = photn
+	if t2 ne 0 then begin
+		photplt = photplt/mean(photplt[0:wht2],/nan)
+	endif
+	plt2=plot([time2[0],time2[-1]],[1,1],linestyle='-',/overplot,$
+			/current)
+	plt2=plot(/overplot,time2,photplt,symbol='dot',linestyle='',/current)
+
+	phots = [[phots],[phot]]
+
+	;xminus = shift(xc0,-1) - xc0
+	;yminus = shift(yc0,-1) - yc0
+	remain = photn0/ffit - 1d0
+	rshift = shift(remain,-1) - remain
+	rshift[repos] = !values.d_nan
+;	rmax = max(rshift,/nan)
+;	wh = where(rshift eq rmax)
+;;	print,'rmax,wh',rmax,wh,time2[wh] 
+        ;pl=plot(time2,rshift,symbol='dot',linestyle='')
+        ;pl=plot(time2[repos],rshift[repos],/overplot,symbol='square',linestyle='')
+
+;if kid eq 211394078 and nkids gt 1 then stop
+
+;if kid eq 211394078 then plt2.save,'sn_k.eps',resolution=300
+
+	; Write Phot data
+	if write then begin
+		datafile = scampaign+'/LC/LC_'+scampaign+'_'+skid
+		if t2 ne 0 then datafile = datafile + '_t' + st2
+		openw,/get_lun,wunit,datafile+'.txt'
+		printf,wunit,'Nt = ',nt,format='(a5,i6)'
+		printf,wunit,'LC of ',skid,format='(a6,a11)'
+		for i = 0,nt-1 do printf,wunit,format='(2D15.6)',time2[i],phot[i]
+		close,wunit
+		free_lun,wunit
+	endif
+	; PLOT phots on each CCD
+	if nkids gt 1 and ~noplot then begin
+		win.setCurrent
+		win.show
+		plt = plot(time2,llc/mean(llc,/nan),color='red',sym_size=.5,$
+		     symbol='dot',linestyle='',yrange=[.95,1.05],$
+		     layout=[lx,ly,place++],xshowtext=0,yshowtext=0,margin=0,/current)
+;		if pstep eq 2 then  $
+;			plt  = plot(/overplot,time2,ffit,color='red',sym_size=.5)
+			plt  = plot(/overplot,time2,phot/mn,symbol='dot',linestyle='',sym_size=.5)
+		text = text(.54,.76,skid,/relative,target=plt,font_size=8)
+		text = text(.04,.76,string(mn,format='(i7)'),/relative,target=plt,font_size=8)
+	endif
+	ccd_old = ccd
+	peak = 0
+	igal++
+endforeach  ; END for each kid
+
+; WRITE summary statistics
+if pstep ge 1 then begin
+	filename = scampaign+'/stats/summarystats_'+sccd
+	if t2 ne 0 then filename = filename + '_t'+st2
+	openw,/get_lun,wunit,filename+'.txt'
+	for i = 0, nkids-1 do printf,wunit,format='(i9,1x,F9.0,1x,4E13.4)',gals[i]
+	close,wunit
+endif
+
+; SAVE PLOT
+if (nkids gt 1) and (noplot eq 0) and (saveplt eq 1) then begin
+	pltname = 'phots_'+scampaign+'ccd'+sccd+'_'+string(np++,format='(i1)')
+	if t2 ne 0 then pltname = pltname + '_t'+st2
+        plt.save,plotdir+pltname+'.eps',resolution=300
+endif
+print,'End phots'
+return,phots
+end
