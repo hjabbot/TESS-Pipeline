@@ -1,0 +1,11 @@
+*.[oa]
+*.ps
+*.gz
+*.pdf
+*.swp
+makehtml/
+*~
+*.sh
+out.html
+*.swp
+.project
